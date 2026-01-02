@@ -30,10 +30,10 @@ CREATE TABLE silver.crm_prd_info1 (
 	prd_end_dt NVARCHAR(50)     -- if the column has date we cannot directly add date datatype, instead use NVARCHAR--
 	);
 
-IF OBJECT_ID('silver.crm_sales_details1','U') IS NOT NULL  -- U for user and creating table related to sales information--
-	DROP TABLE silver.crm_sales_details1 ;
+IF OBJECT_ID('bronze.crm_sales_details','U') IS NOT NULL  -- U for user and creating table related to sales information--
+	DROP TABLE bronze.crm_sales_details ;
 
-CREATE TABLE silver.crm_sales_details1 (
+CREATE TABLE bronze.crm_sales_details (
 	sls_ord_num NVARCHAR(50),
 	sls_prd_key NVARCHAR(50),
 	sls_cust_id INT,
@@ -122,8 +122,8 @@ WITH (
 select * from silver.crm_prd_info1;
 
 -- bulk upload of sales information -- 
-TRUNCATE TABLE silver.crm_sales_details1;	
-BULK INSERT silver.crm_sales_details1
+TRUNCATE TABLE bronze.crm_sales_details;	
+BULK INSERT bronze.crm_sales_details
 FROM 'D:\data with bara\datawarehouse\datawarehouse\sql-data-warehouse-project\datasets\source_crm\sales_details.csv'
 WITH (
 	FIRSTROW = 2,
@@ -135,6 +135,7 @@ WITH (
 DROP TABLE silver.crm_prd_info ;
 CREATE TABLE silver.crm_prd_info (
 	prd_id INT,
+	cat_id NVARCHAR(50),
 	prd_key NVARCHAR(50),
 	prd_nm NVARCHAR(50),
 	prd_cost INT,
@@ -161,12 +162,13 @@ CREATE TABLE silver.crm_sales_details (
 	sls_ord_num NVARCHAR(50),
 	sls_prd_key NVARCHAR(50),
 	sls_cust_id INT,
-	sls_order_dt NVARCHAR(50),    -- if the column has date we cannot directly add date datatype, instead use NVARCHAR--
-	sls_ship_dt NVARCHAR(50),     -- if the column has date we cannot directly add date datatype, instead use NVARCHAR--
-	sls_due_dt NVARCHAR(50),      -- if the column has date we cannot directly add date datatype, instead use NVARCHAR--
+	sls_order_dt DATE,    -- if the column has date we cannot directly add date datatype, instead use NVARCHAR--
+	sls_ship_dt DATE,     -- if the column has date we cannot directly add date datatype, instead use NVARCHAR--
+	sls_due_dt DATE,      -- if the column has date we cannot directly add date datatype, instead use NVARCHAR--
 	sls_sales INT,
 	sls_quantity INT,
-	sls_price INT
+	sls_price INT,
+	dwh_create_date datetime2 default getdate()
 	);
 
 INSERT INTO silver.crm_sales_details
@@ -185,16 +187,16 @@ FROM silver.crm_sales_details1;
 select * from silver.crm_sales_details;
 TRUNCATE TABLE silver.crm_sales_details;
 
-DROP TABLE silver.erp_cust_az12;
-CREATE TABLE silver.erp_cust_az12 (
+DROP TABLE bronze.erp_cust_az12;
+CREATE TABLE bronze.erp_cust_az12 (
 	cid NVARCHAR(50),
 	bdate NVARCHAR(50),   -- if the column has date we cannot directly add date datatype, instead use NVARCHAR
 	gen NVARCHAR(50)
 	);
 
 -- bulk upload of customer az12 information -- 
-TRUNCATE TABLE silver.erp_cust_az12a;	
-BULK INSERT silver.erp_cust_az12a
+TRUNCATE TABLE bronze.erp_cust_az12;	
+BULK INSERT bronze.erp_cust_az12
 FROM 'D:\data with bara\datawarehouse\datawarehouse\sql-data-warehouse-project\datasets\source_erp\cust_az12.csv'
 WITH (
 	FIRSTROW = 2,
@@ -387,18 +389,21 @@ select * from silver.crm_prd_info;
 
 -- complete product data loading into silver table -- 
 
-insert into silver.crm_prd_info (
+insert into silver.crm_prd_info 
+(
 prd_id,
+cat_id,
 prd_key,
 prd_nm,
 prd_cost,
 prd_line,
 prd_start_dt,
-prd_end_dt,
+prd_end_dt
 )
-select prd_id,
-replace(substring(prd_key,1,5)),'-','_') as cat_id,
-substring(prd_key,7,len(prd_key) as prd_key,
+select 
+prd_id,
+replace(substring(prd_key,1,5),'-','_') as cat_id,
+substring(prd_key,7,len(prd_key)) as prd_key,
 prd_nm,
 ISNULL(prd_cost,0) as prd_cost,
 case upper(trim(prd_line))
@@ -408,18 +413,173 @@ when 'S' then 'Other Sales'
 when 'T' then 'Touring'
 else 'N/A'
 end as prd_line,
+cast (prd_start_dt as DATE) as prd_start_dt,
+cast(LEAD(prd_start_dt) OVER(PARTITION BY prd_key ORDER BY prd_start_dt)-1 AS DATE) AS prd_end_dt
+from bronze.crm_prd_info;
+
+
+--LEAD(TRY_CONVERT(DATE, prd_start_dt, 120)) OVER (PARTITION BY prd_key ORDER BY TRY_CONVERT(DATE, prd_start_dt, 120))) AS prd_end_dt -- 
+
+INSERT INTO silver.crm_prd_info (
+    prd_id,
+    cat_id,
+    prd_key,
+    prd_nm,
+    prd_cost,
+    prd_line,
+    prd_start_dt,
+    prd_end_dt
+)
+SELECT
+    prd_id,
+    REPLACE(SUBSTRING(prd_key, 1, 5), '-', '_') AS cat_id,  -- Extracted Category ID -- 
+    SUBSTRING(prd_key, 7, LEN(prd_key)) AS prd_key,         --Extracted Product Key -- 
+    prd_nm,
+    ISNULL(prd_cost, 0) AS prd_cost,
+    CASE UPPER(TRIM(prd_line))
+        WHEN 'M' THEN 'Mountain'
+        WHEN 'R' THEN 'Road'
+        WHEN 'S' THEN 'Other Sales'
+        WHEN 'T' THEN 'Touring'
+        ELSE 'N/A'
+    END AS prd_line,                 -- Map product line values into descriptive values -- 
+    TRY_CONVERT(DATE, prd_start_dt, 120) AS prd_start_dt,
+    DATEADD(
+        DAY,
         -1,
-        LEAD(
-            TRY_CONVERT(DATE, prd_start_dt, 120)
-        ) OVER (
-            PARTITION BY prd_key
-            ORDER BY TRY_CONVERT(DATE, prd_start_dt, 120)
-        )
-    ) AS prd_end_dt,
-from bronze.crm_prod_info;
+        LEAD(TRY_CONVERT(DATE, prd_start_dt, 120))
+            OVER (PARTITION BY prd_key
+                  ORDER BY TRY_CONVERT(DATE, prd_start_dt, 120))
+    ) AS prd_end_dt               -- calculate end date as one day before the start date --
+FROM bronze.crm_prd_info;
+
+-- data quality check --
+
+select * 
+from silver.crm_prd_info
+where prd_end_dt < prd_start_dt;
+
+
+
+-- using the sales table insert datas -- 
+
+Select * from bronze.crm_sales_details;
+
+
+select *
+from bronze.crm_sales_details
+where sls_ord_num <> TRIM(sls_ord_num);
+
+-- 
+
+select *
+from bronze.crm_sales_details
+where sls_prd_key <> TRIM(sls_prd_key);
+
+
+
+select *
+from bronze.crm_sales_details
+where sls_prd_key NOT IN ( select sls_prd_key from silver.crm_prd_info)
+
+
+-- inserting the sales data from bronze to silver -- 
+
+
+INSERT INTO silver.crm_sales_details(
+	sls_ord_num ,
+	sls_prd_key ,
+	sls_cust_id ,
+    sls_order_dt,    
+	sls_ship_dt,     
+	sls_due_dt,     
+	sls_sales ,
+	sls_quantity ,
+	sls_price 
+	)
+select 
+	sls_ord_num,
+	sls_prd_key,
+	sls_cust_id,
+	case 
+	when sls_order_dt = 0 or len(sls_order_dt) <> 8 then null -- checking for 0 or null
+	else  cast(CAST(sls_order_dt as VARCHAR) as date)  -- Interger is changed to VARCHAR and then to DATE
+	end as sls_order_dt,								-- (Interger column cannot be converted into DATE directly)
+	case 
+	when sls_ship_dt = 0 or len(sls_ship_dt) <> 8 then null
+	else  cast(CAST(sls_ship_dt as VARCHAR) as date)
+	end as sls_ship_dt,
+	case 
+	when sls_due_dt = 0 or len(sls_due_dt) <> 8 then null
+	else  cast(CAST(sls_due_dt as VARCHAR) as date)
+	end as sls_due_dt,
+	case
+	when sls_sales is null or sls_sales <=0 or sls_sales <> sls_quantity * abs(sls_price)
+	then sls_quantity * abs(sls_price)
+	else sls_sales
+	end as sls_sales,  -- recalculate sales if original value is missing or incorrect
+	sls_quantity,
+	case
+	when sls_price is null or sls_price <=0 
+	then sls_sales / nullif(sls_quantity ,0)
+	else sls_price
+	end as sls_price   -- derive price if original value is invalid -- 
+	from bronze.crm_sales_details;
+
+select * from silver.crm_sales_details;
+
+
+-- now erp customer table --
+
+select * from bronze.erp_cust_az12;
+
+-- to check the duplicate --
+select cid,
+	case 
+	when cid like ('NAS%') THEN substring(cid,4,len(cid))
+	else cid
+	end as cid,
+	bdate,
+	gen
+	from bronze.erp_cust_az12
+	where case 
+	when cid like ('NAS%') THEN substring(cid,4,len(cid))
+	else cid
+	end not in	(select distinct cst_key from silver.crm_cust_info);
+
+-- to insert -- 
+
+select
+	case 
+	when cid like ('NAS%') THEN substring(cid,4,len(cid))
+	else cid
+	end as cid,
+	CASE
+        WHEN TRY_CONVERT(DATE, bdate, 105) > CAST(GETDATE() AS DATE)
+            THEN NULL
+        ELSE TRY_CONVERT(DATE, bdate, 105)
+    END AS bdate_clean,
+	case 
+	when UPPER(TRIM(gen)) IN ('F', 'FEMALE') then 'Female'
+	when UPPER(TRIM(gen)) IN ('M', 'MALE') then 'Male'
+	else 'N/A'
+	end as gen	
+	from bronze.erp_cust_az12;
+
+	-- data standardization and consistency -- 
+
+	select distinct gen
+	from bronze.erp_cust_az12;
+
+	select distinct gen,
+	case 
+	when UPPER(TRIM(gen)) IN ('F', 'FEMALE') then 'Female'
+	when UPPER(TRIM(gen)) IN ('M', 'MALE') then 'Male'
+	else 'N/A'
+	end as gen
+	from bronze.erp_cust_az12;
 
 
 
 
-
-
+	
