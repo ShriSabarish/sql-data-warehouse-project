@@ -1,0 +1,120 @@
+-- working with gold layer -- 
+
+use DataWarehouse;
+
+CREATE VIEW gold.dim_customers AS
+select
+	ROW_NUMBER()OVER(ORDER BY ci.cst_id) AS customer_key,
+	ci.cst_id AS customer_id,
+	ci.cst_key AS customer_number,
+	ci.cst_firstname AS first_name,
+	ci.cst_lastname AS last_name,	
+	la.cntry AS country,
+	ci.cst_marital_status AS marital_status,
+	CASE WHEN  ci.cst_gndr <> 'N/A' THEN ci.cst_gndr -- CRM is the Master for gender info -- 
+	ELSE COALESCE(ca.gen,'N/A')
+	END as gender,
+	ca.bdate AS birthdate,
+	ci.cst_create_date AS create_date	
+FROM silver.crm_cust_info ci
+LEFT JOIN silver.erp_cust_az12 ca
+ON ci.cst_key = ca.cid
+LEFT JOIN silver.erp_loc_a101 la
+ON ci.cst_key = la.cid;
+
+-- testing for duplicates -- 
+
+select cst_id,count(*)
+from 
+	(select
+	ci.cst_id,
+	ci.cst_key,
+	ci.cst_firstname,
+	ci.cst_lastname,
+	ci.cst_marital_status,
+	ci.cst_gndr,
+	ci.cst_create_date,
+	ca.bdate,
+	ca.gen
+	FROM silver.crm_cust_info ci
+	LEFT JOIN silver.erp_cust_az12 ca
+	ON ci.cst_key = ca.cid
+	LEFT JOIN silver.erp_loc_a101 la
+	ON ci.cst_key = la.cid
+	)t 
+group by cst_id
+having count(*) > 1;
+
+-- testing for data intergrity -- 
+
+select distinct 
+	ci.cst_gndr,
+	ca.gen,
+	CASE WHEN  ci.cst_gndr <> 'N/A' THEN ci.cst_gndr -- CRM is the Master for gender info -- 
+		 ELSE COALESCE(ca.gen,'N/A')
+	END as new_gen
+from silver.crm_cust_info ci
+LEFT JOIN silver.erp_cust_az12 ca
+ON ci.cst_key = ca.cid
+LEFT JOIN silver.erp_loc_a101 la
+ON ci.cst_key = la.cid
+order by 1,2;
+
+-- testing after creating view -- 
+
+select distinct gender
+from gold.dim_customers;
+
+select * from silver.crm_prd_info;
+select * from silver.px_cat_g1v2;
+
+select prd_key,count(*)
+FROM 
+(
+select 
+	pd.prd_id,
+	pd.cat_id,
+	pd.prd_key,
+	pd.prd_nm,
+	pd.prd_cost,
+	pd.prd_line,
+	pd.prd_start_dt,
+	pc.cat,
+	pc.subcat,
+	pc.maintenance
+FROM silver.crm_prd_info pd
+LEFT JOIN silver.px_cat_g1v2 pc
+ON pd.cat_id = pc.id
+WHERE pd.prd_end_dt IS NULL)t   -- filter out all historical data -- 
+group by prd_key
+having count(*) > 1;
+
+
+
+
+
+-- to identify duplicates in product table -- 
+-- this is DIMENSIONS -- all the data present in the table are describing about product details -- 
+-- for dimension table we need to create a surrogate key -- 
+
+CREATE VIEW gold.dim_products AS 
+select
+	ROW_NUMBER() OVER (ORDER BY pd.prd_start_dt,pd.prd_key) as product_key, 
+	pd.prd_id  AS product_id,
+	pd.prd_key AS product_number,
+	pd.prd_nm AS product_name,
+	pd.cat_id AS category_id,
+	pc.cat AS category,
+	pc.subcat AS subcategory,
+	pc.maintenance AS maintenance,
+	pd.prd_cost AS product_cost,
+	pd.prd_line AS product_line,
+	pd.prd_start_dt AS product_start_date
+FROM silver.crm_prd_info pd
+LEFT JOIN silver.px_cat_g1v2 pc
+ON pd.cat_id = pc.id
+WHERE pd.prd_end_dt IS NULL; -- filter out all historical data -- 
+
+select * from gold.dim_products;
+
+
